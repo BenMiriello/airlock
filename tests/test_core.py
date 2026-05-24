@@ -182,23 +182,38 @@ class ImplicitLeases(unittest.TestCase):
 class BudgetDecay(unittest.TestCase):
     def test_decay_shrinks_oversized_implicit_lease(self):
         b = _make_broker()
-        _register_app(b, "ollama", budget=22000, priority=30)
-        # Implicit lease created when observed VRAM was 20000 → budget = 24000
-        l = b.submit_implicit("ollama", client_pid=12345, observed_vram_mib=20000)
+        # Use a small app default so the floor doesn't suppress decay
+        _register_app(b, "tinyapp", budget=200, priority=30)
+        l = b.submit_implicit("tinyapp", client_pid=12345, observed_vram_mib=20000)
         self.assertEqual(l.vram_budget_mib, 24000)
-        # Actual drops sharply. Peak still records the original 20000 spike,
-        # so decay target is 20000*1.2=24000 — no change yet.
-        b.update_actual_usage(12345, 500)
+        # Initial peak = 20000; decay target = 24000 = budget, no change
         changes = b.decay_implicit_budgets()
         self.assertEqual(changes, [])
-        # Simulate a longer interval where the spike has dropped out of the
-        # tracked peak (a v2 enhancement would track rolling peak; here we
-        # manually update for the test).
+        # Simulate steady-state drop to a tiny actual + reset peak
         l.vram_peak_mib = 500
         changes = b.decay_implicit_budgets()
         self.assertEqual(len(changes), 1)
-        # New budget = max(500*1.2=600, floor=256) = 600
+        # New budget = max(500*1.2=600, max(floor=256, app_default=200)) = 600
         self.assertEqual(l.vram_budget_mib, 600)
+
+    def test_decay_respects_app_default_as_floor(self):
+        """Implicit leases for registered apps never decay below
+        default_budget_mib — that's the operator's stated minimum."""
+        b = _make_broker()
+        _register_app(b, "ollama", budget=22000, priority=30)
+        l = b.submit_implicit("ollama", client_pid=12345, observed_vram_mib=20000)
+        # Synthetic: budget pushed very high (simulates an old spike that
+        # blew the budget up); peak is now low.
+        l.vram_budget_mib = 60000
+        l.vram_peak_mib = 200
+        # Decay fires: target = max(peak*1.2, floor=22000) = 22000.
+        # 22000 < 60000*0.5=30000, so decay triggers.
+        changes = b.decay_implicit_budgets()
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(l.vram_budget_mib, 22000)
+        # Second pass: budget == floor, no further decay
+        changes2 = b.decay_implicit_budgets()
+        self.assertEqual(changes2, [])
 
     def test_decay_skips_explicit_leases(self):
         b = _make_broker()
@@ -208,6 +223,19 @@ class BudgetDecay(unittest.TestCase):
         changes = b.decay_implicit_budgets()
         self.assertEqual(changes, [])
         self.assertEqual(r.lease.vram_budget_mib, 10000)
+
+    def test_decay_repairs_below_floor_budget(self):
+        """If an implicit lease somehow has budget < floor (state migration,
+        old buggy data), the next decay tick restores it to the floor."""
+        b = _make_broker()
+        _register_app(b, "comfyui", budget=14000, priority=60)
+        l = b.submit_implicit("comfyui", client_pid=9999, observed_vram_mib=200)
+        # Simulate old buggy data: budget shrunk below floor
+        l.vram_budget_mib = 300
+        l.vram_peak_mib = 200
+        changes = b.decay_implicit_budgets()
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(l.vram_budget_mib, 14000)
 
     def test_actual_usage_tracks_peak(self):
         b = _make_broker()

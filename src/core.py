@@ -538,6 +538,11 @@ class Broker:
         observed peak, shrink the budget toward `peak * decay_factor`. Keeps
         accounting honest as apps drop from a one-time spike to steady-state.
 
+        Floor is the maximum of:
+          - the absolute `floor_mib` constant
+          - the app's registered `default_budget_mib` (registered apps tell
+            us the operator's minimum sensible budget — don't undershoot)
+
         Only shrinks when budget exceeds peak by more than relative_slack
         (default 50%) to avoid thrashing.
 
@@ -547,12 +552,28 @@ class Broker:
         for l in self.active_leases.values():
             if not l.implicit:
                 continue
-            peak = max(l.vram_peak_mib, l.vram_actual_mib, floor_mib)
-            target = max(int(peak * decay_factor), floor_mib)
+            app_default = self.apps[l.app].default_budget_mib if l.app in self.apps else 0
+            effective_floor = max(floor_mib, app_default)
+            # Decay target uses peak, not current actual: a process that
+            # spiked to 20 GiB once shouldn't have its budget shrink just
+            # because it's currently idle.
+            if l.vram_peak_mib > effective_floor:
+                target = int(l.vram_peak_mib * decay_factor)
+            else:
+                # Peak is below the operator-stated minimum — settle at floor.
+                target = effective_floor
+            # Shrink path: budget far above target.
             if target < l.vram_budget_mib * (1 - relative_slack):
                 old = l.vram_budget_mib
                 l.vram_budget_mib = target
                 changes.append((l.id, old, target))
+            # Repair path: implicit lease budget has somehow dropped below the
+            # operator's stated floor (e.g., state migration from a buggy
+            # version). Restore.
+            elif l.vram_budget_mib < effective_floor:
+                old = l.vram_budget_mib
+                l.vram_budget_mib = effective_floor
+                changes.append((l.id, old, effective_floor))
         return changes
 
     def see_unmanaged(self, pid: int, cmdline: str, vram_mib: int) -> None:
