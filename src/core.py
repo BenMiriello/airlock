@@ -84,7 +84,8 @@ class Lease:
     preempt_handler: PreemptHandler
     state: str = LeaseState.ACTIVE.value
     vram_actual_mib: int = 0
-    implicit: bool = False  # true if created from observation, not request
+    vram_peak_mib: int = 0      # high-water mark of observed actual
+    implicit: bool = False       # true if created from observation, not request
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -102,6 +103,7 @@ class Lease:
             reason=d.get("reason", ""), preempt_handler=ph,
             state=d.get("state", LeaseState.ACTIVE.value),
             vram_actual_mib=int(d.get("vram_actual_mib", 0)),
+            vram_peak_mib=int(d.get("vram_peak_mib", 0)),
             implicit=bool(d.get("implicit", False)),
         )
 
@@ -387,6 +389,7 @@ class Broker:
             reason=f"implicit (cmdline match)",
             preempt_handler=cfg.preempt_handler,
             vram_actual_mib=observed_vram_mib,
+            vram_peak_mib=observed_vram_mib,
             implicit=True,
         )
         self.active_leases[lease.id] = lease
@@ -516,11 +519,41 @@ class Broker:
     # --- observation feedback (from poller + watchdog) ---
 
     def update_actual_usage(self, pid: int, vram_mib: int) -> None:
-        """Update vram_actual_mib for whichever lease holds this PID."""
+        """Update vram_actual_mib (and high-water peak) for whichever lease
+        holds this PID."""
         for l in self.active_leases.values():
             if l.client_pid == pid:
                 l.vram_actual_mib = vram_mib
+                if vram_mib > l.vram_peak_mib:
+                    l.vram_peak_mib = vram_mib
                 return
+
+    def decay_implicit_budgets(
+        self,
+        decay_factor: float = 1.2,
+        floor_mib: int = 256,
+        relative_slack: float = 0.5,
+    ) -> list[tuple[str, int, int]]:
+        """For implicit leases where the declared budget is much larger than the
+        observed peak, shrink the budget toward `peak * decay_factor`. Keeps
+        accounting honest as apps drop from a one-time spike to steady-state.
+
+        Only shrinks when budget exceeds peak by more than relative_slack
+        (default 50%) to avoid thrashing.
+
+        Returns list of (lease_id, old_budget, new_budget) for events logged
+        by the caller."""
+        changes: list[tuple[str, int, int]] = []
+        for l in self.active_leases.values():
+            if not l.implicit:
+                continue
+            peak = max(l.vram_peak_mib, l.vram_actual_mib, floor_mib)
+            target = max(int(peak * decay_factor), floor_mib)
+            if target < l.vram_budget_mib * (1 - relative_slack):
+                old = l.vram_budget_mib
+                l.vram_budget_mib = target
+                changes.append((l.id, old, target))
+        return changes
 
     def see_unmanaged(self, pid: int, cmdline: str, vram_mib: int) -> None:
         u = self.unmanaged.get(pid)

@@ -51,6 +51,9 @@ WATCHDOG_INTERVAL_S = 2.0
 TICK_INTERVAL_S = 1.0
 PREEMPT_GRACE_S = 30
 PREEMPT_KILL_GRACE_S = 10
+# How often the tick loop runs the implicit-budget decay pass. Once a minute
+# is enough; the decay function is cheap but logs an event per change.
+BUDGET_DECAY_INTERVAL_S = 60
 
 
 log = logging.getLogger("airlockd")
@@ -209,6 +212,7 @@ class Runtime:
             self._stop_flag.wait(WATCHDOG_INTERVAL_S)
 
     def _tick_loop(self) -> None:
+        decay_counter = 0
         while not self._stop_flag.is_set():
             try:
                 with self.lock:
@@ -220,6 +224,16 @@ class Runtime:
                         for r in effect.timeouts:
                             self.store.log_event("timeout", req_id=r.id, app=r.app)
                         self._save_state_locked()
+                    # Implicit-lease budget decay every BUDGET_DECAY_INTERVAL ticks.
+                    decay_counter += 1
+                    if decay_counter * TICK_INTERVAL_S >= BUDGET_DECAY_INTERVAL_S:
+                        decay_counter = 0
+                        changes = self.broker.decay_implicit_budgets()
+                        for lid, old, new in changes:
+                            self.store.log_event("implicit_budget_decay",
+                                                 lease_id=lid, old_mib=old, new_mib=new)
+                        if changes:
+                            self._save_state_locked()
             except Exception as e:
                 log.exception("tick: %s", e)
             self._stop_flag.wait(TICK_INTERVAL_S)
@@ -295,13 +309,25 @@ class Runtime:
         """Run preempt handlers off the lock (HTTP calls can block).
 
         We've already marked the leases as PREEMPTING in core. SIGTERM happens
-        via the _preempt_loop after grace. HTTP handlers fire immediately."""
+        via the _preempt_loop after grace. HTTP / app-soft-preempt handlers
+        fire immediately so the app can release VRAM voluntarily before any
+        signal escalation."""
         for lease_id, ph in preempts:
             self.store.log_event("preempt_started", lease_id=lease_id, handler=ph.type)
             if ph.type == "http" and ph.url:
                 threading.Thread(
                     target=self._fire_http_handler, args=(lease_id, ph),
                     daemon=True, name="preempt-http",
+                ).start()
+            elif ph.type == "comfyui_free":
+                threading.Thread(
+                    target=self._fire_comfyui_free, args=(lease_id, ph),
+                    daemon=True, name="preempt-comfyui",
+                ).start()
+            elif ph.type == "forge_unload":
+                threading.Thread(
+                    target=self._fire_forge_unload, args=(lease_id, ph),
+                    daemon=True, name="preempt-forge",
                 ).start()
             # sigterm handlers are fired by the escalation loop after grace.
 
@@ -316,6 +342,38 @@ class Runtime:
             self.store.log_event("preempt_http_ok", lease_id=lease_id, url=ph.url)
         except Exception as e:
             self.store.log_event("preempt_http_failed", lease_id=lease_id, url=ph.url, error=str(e))
+
+    def _fire_comfyui_free(self, lease_id: str, ph: PreemptHandler) -> None:
+        """POST /free to ComfyUI to unload all models without killing the
+        process. Uses ph.url as the base (default http://127.0.0.1:8188)."""
+        base = ph.url or "http://127.0.0.1:8188"
+        url = base.rstrip("/") + "/free"
+        try:
+            body = json.dumps({"unload_models": True, "free_memory": True}).encode()
+            req = urllib.request.Request(url, data=body,
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                _ = r.read()
+            self.store.log_event("preempt_comfyui_free_ok", lease_id=lease_id, url=url)
+        except Exception as e:
+            self.store.log_event("preempt_comfyui_free_failed",
+                                 lease_id=lease_id, url=url, error=str(e))
+
+    def _fire_forge_unload(self, lease_id: str, ph: PreemptHandler) -> None:
+        """POST /sdapi/v1/unload-checkpoint to Forge — releases the model
+        without killing the process. ph.url is the base (default
+        http://127.0.0.1:7860)."""
+        base = ph.url or "http://127.0.0.1:7860"
+        url = base.rstrip("/") + "/sdapi/v1/unload-checkpoint"
+        try:
+            req = urllib.request.Request(url, data=b"",
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                _ = r.read()
+            self.store.log_event("preempt_forge_unload_ok", lease_id=lease_id, url=url)
+        except Exception as e:
+            self.store.log_event("preempt_forge_unload_failed",
+                                 lease_id=lease_id, url=url, error=str(e))
 
 
 # ============================================================

@@ -179,6 +179,46 @@ class ImplicitLeases(unittest.TestCase):
         self.assertIsNone(l)
 
 
+class BudgetDecay(unittest.TestCase):
+    def test_decay_shrinks_oversized_implicit_lease(self):
+        b = _make_broker()
+        _register_app(b, "ollama", budget=22000, priority=30)
+        # Implicit lease created when observed VRAM was 20000 → budget = 24000
+        l = b.submit_implicit("ollama", client_pid=12345, observed_vram_mib=20000)
+        self.assertEqual(l.vram_budget_mib, 24000)
+        # Actual drops sharply. Peak still records the original 20000 spike,
+        # so decay target is 20000*1.2=24000 — no change yet.
+        b.update_actual_usage(12345, 500)
+        changes = b.decay_implicit_budgets()
+        self.assertEqual(changes, [])
+        # Simulate a longer interval where the spike has dropped out of the
+        # tracked peak (a v2 enhancement would track rolling peak; here we
+        # manually update for the test).
+        l.vram_peak_mib = 500
+        changes = b.decay_implicit_budgets()
+        self.assertEqual(len(changes), 1)
+        # New budget = max(500*1.2=600, floor=256) = 600
+        self.assertEqual(l.vram_budget_mib, 600)
+
+    def test_decay_skips_explicit_leases(self):
+        b = _make_broker()
+        r = b.submit(app="explicit", vram_budget_mib=10000, client_pid=5555)
+        b.update_actual_usage(5555, 100)
+        r.lease.vram_peak_mib = 100
+        changes = b.decay_implicit_budgets()
+        self.assertEqual(changes, [])
+        self.assertEqual(r.lease.vram_budget_mib, 10000)
+
+    def test_actual_usage_tracks_peak(self):
+        b = _make_broker()
+        r = b.submit(app="a", vram_budget_mib=5000, client_pid=9999)
+        b.update_actual_usage(9999, 100)
+        b.update_actual_usage(9999, 800)
+        b.update_actual_usage(9999, 200)
+        self.assertEqual(r.lease.vram_peak_mib, 800)
+        self.assertEqual(r.lease.vram_actual_mib, 200)
+
+
 class BoostsAndForget(unittest.TestCase):
     def test_boost_overrides_priority(self):
         b = _make_broker()

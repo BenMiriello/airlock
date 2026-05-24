@@ -60,6 +60,19 @@ Listens on `http://127.0.0.1:8447` by default. State at
 python3 -m unittest tests.test_core tests.test_integration
 ```
 
+## App integrations
+
+Drop-in extensions live under `examples/`:
+
+- [`examples/comfyui-airlock/`](examples/comfyui-airlock/) — copy into ComfyUI's
+  `custom_nodes/`. Hooks every prompt for lease acquire/release, and gives
+  airlockd a no-kill VRAM release path via ComfyUI's `/free` endpoint.
+- [`examples/airlock-forge/`](examples/airlock-forge/) — copy into Forge's
+  `extensions/`. Same pattern via Forge's Script subclass + the
+  `/sdapi/v1/unload-checkpoint` release path.
+
+Both extensions are fail-open: if airlockd is down, the app runs normally.
+
 ## System install
 
 Not yet automated. See `PLAN.md` §14 for the design (`/opt/airlock/`,
