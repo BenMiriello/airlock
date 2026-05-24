@@ -70,8 +70,13 @@ Drop-in extensions live under `examples/`:
 - [`examples/airlock-forge/`](examples/airlock-forge/) — copy into Forge's
   `extensions/`. Same pattern via Forge's Script subclass + the
   `/sdapi/v1/unload-checkpoint` release path.
+- [`examples/reverse-proxy/`](examples/reverse-proxy/) — fallback when you
+  can't drop in the extensions; wraps ComfyUI/Forge generation requests
+  externally.
+- [`examples/sudoers/`](examples/sudoers/) — cross-user SIGTERM authority
+  for the preempt escalation path.
 
-Both extensions are fail-open: if airlockd is down, the app runs normally.
+All integrations are fail-open: if airlockd is down, the app runs normally.
 
 ## Hard VRAM cap (HAMi-core)
 
