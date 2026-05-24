@@ -1,0 +1,44 @@
+[Unit]
+Description=ComfyUI (managed under airlock)
+After=network.target airlockd.service
+Wants=airlockd.service
+
+[Service]
+Type=simple
+# Set this to whichever user owns the ComfyUI install. Often a separate
+# user from the broker so VRAM-using apps are isolated from broker-state.
+User=comfyuser
+Group=comfyuser
+
+WorkingDirectory=/home/comfyuser/ComfyUI
+
+# Recommended flags for airlock coexistence:
+#   --disable-smart-memory : ComfyUI unloads between prompts so airlock's
+#                            acquire/release lease cadence matches reality
+#   --reserve-vram 1       : keep 1 GiB headroom for other apps
+ExecStart=/home/comfyuser/ComfyUI/.venv/bin/python /home/comfyuser/ComfyUI/main.py \
+    --listen 0.0.0.0 \
+    --port 8188 \
+    --disable-smart-memory \
+    --reserve-vram 1
+
+# Restart cleanly if ComfyUI is killed by airlock (or anything else) so the
+# operator doesn't have to babysit. Each restart is fresh — no model state
+# is preserved beyond what's on disk.
+Restart=on-failure
+RestartSec=5
+
+# Fragmentation-reducing PyTorch knob.
+Environment="PYTORCH_ALLOC_CONF=expandable_segments:True"
+# Where airlockd lives.
+Environment="AIRLOCK_URL=http://127.0.0.1:8447"
+
+# Hard VRAM cap via HAMi-core libvgpu.so. The cap should match the budget
+# the airlock-comfyui custom node registers, OR be a generous upper bound —
+# the per-prompt lease budget can vary, but this is a process-level ceiling.
+# Comment out if libvgpu.so isn't installed.
+# Environment="LD_PRELOAD=/usr/local/lib/airlock/libvgpu.so"
+# Environment="CUDA_DEVICE_MEMORY_LIMIT=14g"
+
+[Install]
+WantedBy=multi-user.target

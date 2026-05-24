@@ -85,6 +85,27 @@ def _parse_budget(s: str) -> int:
     return int(val)
 
 
+def _find_libvgpu() -> str | None:
+    """Locate HAMi-core's libvgpu.so for LD_PRELOAD hard-cap mode.
+    Override via AIRLOCK_LIBVGPU. Default scan:
+      /usr/local/lib/airlock/libvgpu.so
+      /usr/lib/airlock/libvgpu.so
+      ~/.local/lib/airlock/libvgpu.so
+    Returns absolute path or None."""
+    explicit = os.environ.get("AIRLOCK_LIBVGPU")
+    if explicit and os.path.isfile(explicit):
+        return explicit
+    candidates = [
+        "/usr/local/lib/airlock/libvgpu.so",
+        "/usr/lib/airlock/libvgpu.so",
+        os.path.expanduser("~/.local/lib/airlock/libvgpu.so"),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
 def _parse_ttl(s: str) -> int:
     """Accept '30m', '2h', '300s', '300'."""
     s = s.strip().lower()
@@ -228,6 +249,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     # Spawn subprocess
     env = dict(os.environ)
     env["AIRLOCK_LEASE_ID"] = lease_id
+
+    # Hard VRAM cap via HAMi-core libvgpu.so libcuda interposer, if installed.
+    # Skip if --no-cap flag set or library not present.
+    if not args.no_cap:
+        libvgpu = _find_libvgpu()
+        if libvgpu:
+            existing = env.get("LD_PRELOAD", "")
+            env["LD_PRELOAD"] = libvgpu + (":" + existing if existing else "")
+            env["CUDA_DEVICE_MEMORY_LIMIT"] = f"{j['vram_budget_mib']}m"
+            print(f"[gpu run] hard cap enabled: LD_PRELOAD={libvgpu}, CUDA_DEVICE_MEMORY_LIMIT={j['vram_budget_mib']}m",
+                  file=sys.stderr)
+        # Reduce fragmentation OOMs on 3090-class consumer cards.
+        env.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
     def _kill_child(sig: int, _frame: Any) -> None:
         if proc and proc.poll() is None:
@@ -375,6 +409,8 @@ def build_parser() -> argparse.ArgumentParser:
     pn.add_argument("--ttl")
     pn.add_argument("--reason")
     pn.add_argument("--wait", type=int, default=300)
+    pn.add_argument("--no-cap", action="store_true",
+                    help="skip LD_PRELOAD hard cap even if libvgpu.so is installed")
     pn.add_argument("cmd", nargs=argparse.REMAINDER, help="command after --")
     pn.set_defaults(func=cmd_run)
 

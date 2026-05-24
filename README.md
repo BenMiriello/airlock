@@ -73,10 +73,27 @@ Drop-in extensions live under `examples/`:
 
 Both extensions are fail-open: if airlockd is down, the app runs normally.
 
+## Hard VRAM cap (HAMi-core)
+
+For real OOM prevention, install HAMi-core's libvgpu.so libcuda interposer:
+
+```bash
+sudo ./install/install-hami.sh
+```
+
+After install, `airlock run` and `airlock start` automatically set
+`LD_PRELOAD=libvgpu.so` and `CUDA_DEVICE_MEMORY_LIMIT=<lease>` so the kernel
+hard-caps the wrapped process's VRAM at the leased amount. Pass `--no-cap`
+to skip.
+
+This is the only mechanism that actually prevents OOM on consumer NVIDIA
+GPUs (no MIG, no cgroup VRAM controller, etc.). See `PLAN.md` for details.
+
 ## System install
 
-Not yet automated. See `PLAN.md` §14 for the design (`/opt/airlock/`,
-dedicated user, systemd unit, `CAP_KILL` for cross-user enforcement).
+systemd units at `examples/systemd/`: `airlockd.service`, `comfyui.service`,
+`forge.service`. Edit users/paths and install. Apps wrapped with
+`Restart=on-failure` so an airlock-initiated preempt auto-recovers.
 
 ## License
 

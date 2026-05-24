@@ -1,0 +1,36 @@
+[Unit]
+Description=airlock — GPU traffic manager daemon
+After=network.target nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=simple
+# Dedicated system user created by install-system.sh.
+# For dev mode just run as your own user.
+User=airlock
+Group=airlock
+
+ExecStart=/usr/local/bin/airlockd \
+    --host 127.0.0.1 \
+    --port 8447 \
+    --state-dir /var/lib/airlockd \
+    --config-dir /etc/airlockd \
+    --log-level INFO
+
+Restart=always
+RestartSec=3
+
+# Cross-user SIGTERM authority for preempt fallback. Needs CAP_KILL in both
+# AmbientCapabilities (granted to children — irrelevant here, daemon doesn't
+# fork) AND CapabilityBoundingSet (defines the upper limit).
+AmbientCapabilities=CAP_KILL
+CapabilityBoundingSet=CAP_KILL
+
+# Tightening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/airlockd /var/log
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

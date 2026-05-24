@@ -1,0 +1,31 @@
+[Unit]
+Description=Stable Diffusion WebUI Forge (managed under airlock)
+After=network.target airlockd.service
+Wants=airlockd.service
+
+[Service]
+Type=simple
+User=forgeuser
+Group=forgeuser
+
+WorkingDirectory=/home/forgeuser/stable-diffusion-webui-forge
+
+# Recommended flags for airlock coexistence:
+#   --always-offload-from-vram : Forge unloads after each generation so
+#                                acquire/release lease cadence matches reality.
+ExecStart=/home/forgeuser/stable-diffusion-webui-forge/webui.sh \
+    --listen \
+    --always-offload-from-vram
+
+Restart=on-failure
+RestartSec=5
+
+Environment="PYTORCH_ALLOC_CONF=expandable_segments:True"
+Environment="AIRLOCK_URL=http://127.0.0.1:8447"
+
+# Hard cap (optional).
+# Environment="LD_PRELOAD=/usr/local/lib/airlock/libvgpu.so"
+# Environment="CUDA_DEVICE_MEMORY_LIMIT=10g"
+
+[Install]
+WantedBy=multi-user.target
